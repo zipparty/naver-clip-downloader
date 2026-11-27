@@ -65,7 +65,11 @@ def clip_info(u):
                 if i in (2,6,12):
                     for frame in page.frames:
                         try:
-                            play=frame.get_by_role('button',name=re.compile(r'^(재생|영상 재생|동영상 재생|Play)
+                            play=frame.get_by_role('button',name=re.compile(r'^(재생|영상 재생|동영상 재생|Play)$',re.I)).first
+                            if play.is_visible(): play.click(timeout=1500); break
+                            v=frame.locator('video').first
+                            if v.is_visible(): v.click(timeout=1500); break
+                        except Exception: pass
                 for frame in page.frames:
                     try:
                         videos=frame.evaluate("""() => [...document.querySelectorAll('video')].map(v=>{v.muted=true;v.play().catch(()=>{});return {src:v.currentSrc||v.src,duration:Number.isFinite(v.duration)?v.duration:null}})""")
