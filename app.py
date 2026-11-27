@@ -1,12 +1,27 @@
 import os, tempfile, shutil, subprocess, json
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urljoin
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+from urllib.error import HTTPError
 from flask import Flask, request, jsonify, send_file, render_template_string
 app=Flask(__name__)
 HTML='''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NAVER CLIP DOWNLOADER</title><style>*{box-sizing:border-box}body{font:16px system-ui;background:#f5f6f7;color:#202124;margin:0}main{max-width:640px;margin:8vh auto;padding:24px}h1{font-size:25px}form{display:flex;gap:8px}input{min-width:0;flex:1;padding:14px;border:1px solid #ccc;border-radius:10px}button{border:0;background:#03a94f;color:white;padding:14px 22px;border-radius:10px;cursor:pointer}video,img{display:block;max-width:100%;max-height:65vh;margin:20px auto;border-radius:12px}dialog{border:0;border-radius:16px;padding:24px;box-shadow:0 10px 60px #0004}dialog::backdrop{background:#0007}#cancel{background:#777}small{color:#666}</style><main><h1>NAVER CLIP DOWNLOADER</h1><form id="f"><input id="u" type="url" required placeholder="네이버 클립 주소 입력"><button>확인</button></form><p id="status" role="status"></p><section id="preview"></section><button id="again" hidden>다운로드</button></main><dialog id="d"><p>다운로드 받으시겠습니까?</p><button id="yes">예</button> <button id="cancel">아니오</button></dialog><script>const $=id=>document.getElementById(id);let current='';$('f').onsubmit=async e=>{e.preventDefault();$('again').hidden=true;$('preview').replaceChildren();$('status').textContent='영상 확인 중…';const url=$('u').value;try{const r=await fetch('/info?url='+encodeURIComponent(url));if(!(r.headers.get('content-type')||'').includes('application/json'))throw Error('서버 응답 오류 ('+r.status+'). 다시 시도해 주세요.');const j=await r.json();if(!r.ok)throw Error(j.error);current=url;const t=document.createElement('h3');t.textContent=j.title;$('preview').append(t);if(j.preview){const v=document.createElement('video');v.controls=true;v.playsInline=true;v.poster=j.thumbnail||'';v.src=j.preview;$('preview').append(v);v.onerror=()=>{$('status').textContent='미리보기 재생 불가. 원본 페이지에서 확인할 수 있습니다.'}}else if(j.thumbnail){const i=document.createElement('img');i.src=j.thumbnail;$('preview').append(i)}$('status').textContent=j.preview?'':'썸네일 미리보기';$('again').hidden=false;$('d').showModal()}catch(e){$('status').textContent=e.message}};$('again').onclick=()=>$('d').showModal();$('cancel').onclick=()=>$('d').close();$('yes').onclick=()=>{$('d').close();$('status').textContent='다운로드 요청 중…';location.href='/download?url='+encodeURIComponent(current)};</script>'''
 def validated():
     u=request.args.get('url',''); p=urlparse(u)
-    if len(u)>2048 or p.scheme!='https' or p.username or p.password or p.hostname not in {'naver.me','clip.naver.com','m.clip.naver.com','m.blog.naver.com','blog.naver.com','tv.naver.com','m.tv.naver.com'}: raise ValueError('지원하는 네이버 HTTPS 주소를 입력하세요.')
-    return u
+    if len(u)>2048 or p.scheme!='https' or p.username or p.password or p.hostname not in {'naver.me','clip.naver.com','m.clip.naver.com','m.blog.naver.com','blog.naver.com','tv.naver.com','m.tv.naver.com','m.naver.com','link.naver.com'}: raise ValueError('지원하는 네이버 HTTPS 주소를 입력하세요.')
+    for _ in range(6):
+        p=urlparse(u)
+        if p.scheme!='https' or p.username or p.password or p.hostname not in {'naver.me','link.naver.com','m.naver.com','clip.naver.com','m.clip.naver.com','m.blog.naver.com','blog.naver.com','tv.naver.com','m.tv.naver.com'}: raise ValueError('지원하지 않는 연결 주소입니다.')
+        if p.hostname=='link.naver.com':
+            u=parse_qs(p.query).get('url',[''])[0]; continue
+        if p.hostname!='naver.me': return u
+        try:
+            with build_opener(NoRedirect()).open(Request(u,headers={'User-Agent':'Mozilla/5.0'}),timeout=10) as r: return u
+        except HTTPError as e:
+            if e.code not in (301,302,303,307,308): raise
+            u=urljoin(u,e.headers['Location'])
+    raise ValueError('연결 주소가 너무 많습니다.')
 def run(args, timeout=90):
     return subprocess.run(['yt-dlp','--ignore-config','--no-playlist','--no-warnings','--socket-timeout','15',*args],capture_output=True,text=True,check=True,timeout=timeout)
 @app.get('/')
@@ -20,7 +35,7 @@ def info():
     except ValueError as e:return jsonify(error=str(e)),400
     except subprocess.CalledProcessError as e:
         app.logger.warning('Extractor failed: %s', (e.stderr or '')[-1000:])
-        return jsonify(error='영상 추출 실패'),422
+        return jsonify(error='네이버 클립 영상 추출 실패 (현재 재생 형식 미지원)'),422
     except subprocess.TimeoutExpired:return jsonify(error='영상 조회 시간 초과'),504
     except Exception:
         app.logger.exception('Video lookup failed')
