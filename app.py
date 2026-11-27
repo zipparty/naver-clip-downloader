@@ -38,22 +38,28 @@ def clip_info(u):
             api='https://api-videohub.naver.com/shortformhub/feeds/'+version+'/card?'+urlencode(params)
             with build_opener(NoRedirect()).open(Request(api,headers=headers),timeout=12) as r: data=json.load(r)
             content=data['card']['content']; vod=content['vod']
+            playback=vod.get('playback') or {}
+            if isinstance(playback,str): playback=json.loads(playback)
             if vod.get('playable') is False: raise ValueError('재생할 수 없는 영상입니다.')
             if content.get('mediaId') and content['mediaId'].upper()!=mid.upper(): raise ValueError('다른 영상이 반환되었습니다.')
             candidates=[]
-            for mpd in vod['playback']['MPD']:
+            for item in (playback.get('videos') or {}).get('list',[]):
+                base=item.get('source',''); parsed=urlparse(base)
+                if parsed.scheme=='https' and parsed.hostname and parsed.hostname.endswith('.pstatic.net') and not parsed.username and not parsed.password and not item.get('drm'):
+                    candidates.append((int(item.get('bitrate') or (item.get('encodingOption') or {}).get('width') or 0),base))
+            for mpd in playback.get('MPD',[]):
                 for period in mpd.get('Period',[]):
                     for aset in period.get('AdaptationSet',[]):
-                        if aset.get('@mimeType')!='video/mp4' or aset.get('ContentProtection'): continue
+                        if aset.get('mimeType',aset.get('@mimeType'))!='video/mp4' or aset.get('ContentProtection'): continue
                         for rep in aset.get('Representation',[]):
                             if rep.get('ContentProtection'): continue
                             for base in rep.get('BaseURL',[]):
                                 if not isinstance(base,str): continue
                                 parsed=urlparse(base)
                                 if parsed.scheme=='https' and parsed.hostname and parsed.hostname.endswith('.pstatic.net') and not parsed.username and not parsed.password:
-                                    candidates.append((int(rep.get('@bandwidth',0)),base))
+                                    candidates.append((int(rep.get('bandwidth',rep.get('@bandwidth',0))),base))
             if candidates: return dict(title=content.get('title') or '네이버 클립',thumbnail=None,preview=max(candidates)[1])
-        except Exception as e: app.logger.warning('Clip API %s failed: %s',version,type(e).__name__)
+        except Exception as e: app.logger.warning('Clip API %s failed: %s %s; response keys: %s',version,type(e).__name__,str(e),list(data.keys()) if 'data' in locals() and isinstance(data,dict) else [])
     raise ValueError('클립 재생 정보를 가져오지 못했습니다.')
 @app.get('/')
 def index():return render_template_string(HTML)
