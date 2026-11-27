@@ -6,6 +6,7 @@ class NoRedirect(HTTPRedirectHandler):
 from urllib.error import HTTPError
 from flask import Flask, request, jsonify, send_file, render_template_string
 app=Flask(__name__)
+app.logger.setLevel('INFO')
 HTML='''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NAVER CLIP DOWNLOADER</title><style>*{box-sizing:border-box}body{font:16px system-ui;background:#f5f6f7;color:#202124;margin:0}main{max-width:640px;margin:8vh auto;padding:24px}h1{font-size:25px;margin-bottom:6px}form,.buttons{display:flex;gap:8px}input{min-width:0;flex:1;padding:14px;border:1px solid #ccc;border-radius:10px}button{border:0;background:#03a94f;color:white;padding:14px 22px;border-radius:10px;cursor:pointer}button:disabled{background:#c8ccca;cursor:default}video,img{display:block;max-width:100%;max-height:65vh;margin:20px auto;border-radius:12px}progress{width:100%;height:16px;accent-color:#03a94f}small{color:#666}.buttons button{flex:1}#g{margin:20px 0}</style><main><h1>NAVER CLIP DOWNLOADER</h1><p style="font-size:12px;color:#666;margin:0 0 16px">주소 형식: https://naver.me/_________</p><form id="f"><input id="u" type="url" required placeholder="네이버 클립 주소 입력"><button id="check">확인</button></form><p id="status" role="status"></p><section id="preview"></section><div class="buttons"><button id="extract" disabled>MP4 추출</button><button id="download" disabled>다운로드하기</button></div><div id="g" hidden><p id="pct">0%</p><progress id="bar" max="100" value="0"></progress></div></main><script>const $=id=>document.getElementById(id);let job='',timer=null;async function api(path,options){const r=await fetch(path,options);if(!(r.headers.get('content-type')||'').includes('application/json'))throw Error('서버 응답 오류 ('+r.status+')');const j=await r.json();if(!r.ok)throw Error(j.error);return j;}function reset(){clearTimeout(timer);job='';$('extract').disabled=true;$('download').disabled=true;$('preview').replaceChildren();$('g').hidden=true;$('bar').value=0;}function busy(v){$('check').disabled=v;$('u').disabled=v;}$('f').onsubmit=async e=>{e.preventDefault();reset();busy(true);$('status').textContent='영상 확인 중…';try{const j=await api('/info?url='+encodeURIComponent($('u').value));job=j.id;if(j.thumbnail){const img=document.createElement('img');img.src=j.thumbnail; $('preview').append(img);} $('status').textContent='추출 가능';$('extract').disabled=false;}catch(e){$('status').textContent=e.message}finally{busy(false)}};$('u').oninput=reset;$('extract').onclick=async()=>{busy(true);$('extract').disabled=true;$('download').disabled=true;$('g').hidden=false;$('pct').textContent='0%';$('status').textContent='영상 추출 중…';try{await api('/extract/'+job,{method:'POST'});poll();}catch(e){$('status').textContent=e.message;busy(false);$('extract').disabled=false;}};async function poll(){try{const j=await api('/status/'+job);if(j.percent===null){$('bar').removeAttribute('value');$('pct').textContent='추출 중 (전체 길이 확인 불가)';}else{$('bar').value=j.percent;$('pct').textContent=j.percent+'%';}if(j.state==='done'){$('status').textContent='추출 완료';$('download').disabled=false;busy(false);}else if(j.state==='error'){throw Error(j.error||'추출 실패');}else timer=setTimeout(poll,700);}catch(e){$('status').textContent=e.message;busy(false);$('extract').disabled=false;}}$('download').onclick=()=>location.href='/file/'+job;</script>'''
 def validated():
     u=request.args.get('url',''); p=urlparse(u)
@@ -28,6 +29,7 @@ def clip_info(u):
     from playwright.sync_api import sync_playwright
     from urllib.parse import unquote
     candidates={}
+    segments=set()
     seen=set()
     ua='Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36'
     def collect(url,ctype=''):
@@ -36,6 +38,9 @@ def clip_info(u):
         seen.add((p.hostname,p.path[:120],ctype[:60]))
         if p.scheme!='https' or not p.hostname.endswith(('.pstatic.net','.naver.com')) or p.username or p.password: return
         path=unquote(p.path).lower()
+        if path.endswith('.ts') or 'mp2t' in ctype:
+            segments.add(url)
+            return
         if '.m3u8' in path or 'mpegurl' in ctype: kind='hls'
         elif '.mpd' in path or 'dash+xml' in ctype: kind='dash'
         elif path.endswith('.mp4') and not re.search(r'(?:seg(?:ment)?|chunk|init)[-_]?\d',path): kind='mp4'
@@ -54,7 +59,7 @@ def clip_info(u):
             ctx.on('response',response)
             page.goto(u,wait_until='domcontentloaded',timeout=25000)
             duration=None
-            for i in range(18):
+            for i in range(30):
                 for frame in page.frames:
                     try:
                         videos=frame.evaluate("""() => [...document.querySelectorAll('video')].map(v=>{v.muted=true;v.play().catch(()=>{});return {src:v.currentSrc||v.src,duration:Number.isFinite(v.duration)?v.duration:null}})""")
@@ -63,13 +68,17 @@ def clip_info(u):
                             if v.get('duration'): duration=v['duration']
                     except Exception: pass
                 if candidates and i>=3: break
+                if segments and duration and i>=min(29,int(duration)+2): break
                 page.wait_for_timeout(1000)
             thumb=None
-            if candidates:
+            if candidates or segments:
                 try: thumb='data:image/jpeg;base64,'+base64.b64encode(page.screenshot(type='jpeg',quality=65,timeout=3000)).decode()
                 except Exception: pass
             app.logger.info('Browser playback: host=%s title=%s requests=%s candidates=%s',urlparse(page.url).hostname,page.title()[:100],list(seen)[:80],len(candidates))
+            app.logger.info('TS segments detected: %s',len(segments))
         finally: browser.close()
+    if not candidates and segments:
+        raise ValueError('TS 분할 영상은 발견했지만 전체 재생목록을 확인하지 못했습니다.')
     if not candidates: raise ValueError('브라우저에서 영상 스트림을 발견하지 못했습니다.')
     ordered=sorted(candidates,key=lambda x: {'hls':0,'dash':1,'mp4':2}[candidates[x]])
     return ordered,duration,thumb,ua
